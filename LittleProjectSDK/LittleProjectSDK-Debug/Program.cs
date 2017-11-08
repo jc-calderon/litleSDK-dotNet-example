@@ -1,5 +1,6 @@
 ﻿using System;
 using System.Collections.Generic;
+using System.Linq;
 using Litle.Sdk;
 using Litle.Sdk.Properties;
 using Newtonsoft.Json;
@@ -13,30 +14,67 @@ namespace LittleProjectSDK_Debug
 
         private static void Main(string[] args)
         {
-            contact contact = new contact
-            {
-                name = "John Smith",
-                addressLine1 = "1 Main St.",
-                city = "Burlington",
-                state = "MA",
-                zip = "01803",
-                country = countryTypeEnum.US
-            };
-
-            cardType card = new cardType
-            {
-                type = methodOfPaymentTypeEnum.VI,
-                number = "4100423312345000",
-                expDate = "0112",
-                cardValidationNum = "349"
-            };
-
-            //DoAuthorization(contact, card);
-            //DoSale(contact, card);
-            DoAccountUpdater(contact, card);
+            DoAuthorization(GetContacts().First(), GetCreditCards().First());
+            //DoSale(GetContacts().First(), GetCreditCards().First());
+            //DoAccountUpdater(GetCreditCards());
+            //DoRFRRequest(DateTime.Today);
 
             Console.ReadLine();
         }
+
+        #region Batch processing
+
+        private static void DoAccountUpdater(List<cardType> creditCards)
+        {
+            Console.WriteLine("************************ Do Account Updater **************************");
+            litleRequest litleRequestData = new litleRequest(GetSettings(SettingsType.Prelive));
+            batchRequest batchRequestData = new batchRequest(GetSettings(SettingsType.Prelive));
+
+            var orderId = 1;
+            foreach (var creditCard in creditCards)
+            {
+                accountUpdate accountUpdateData = new accountUpdate
+                {
+                    orderId = orderId++.ToString(),
+                    card = creditCard
+                };
+
+                batchRequestData.addAccountUpdate(accountUpdateData);
+            }
+
+            litleRequestData.addBatch(batchRequestData);
+
+            var batchName = litleRequestData.sendToLitle();
+            litleRequestData.blockAndWaitForResponse(batchName, EstimatedResponseTime(0, creditCards.Count));
+            var litleResponse = litleRequestData.receiveFromLitle(batchName);
+
+            ShowLitleBatchResponse(litleResponse);
+        }
+
+        private static void DoRFRRequest(DateTime date)
+        {
+            Console.WriteLine("************************ Do RFR Request **************************");
+            var merchantId = GetSettings(SettingsType.Prelive)["merchantId"];
+
+            var rfr = new RFRRequest();
+            rfr.accountUpdateFileRequestData = new accountUpdateFileRequestData();
+            rfr.accountUpdateFileRequestData.postDay = date;
+            rfr.accountUpdateFileRequestData.merchantId = merchantId;
+
+            var req = new litleRequest(GetSettings(SettingsType.Prelive));
+            req.addRFRRequest(rfr);
+
+            var rfrBatchName = req.sendToLitle();
+
+            req.blockAndWaitForResponse(rfrBatchName, EstimatedResponseTime(0, 2));
+            var litleRfrResponse = req.receiveFromLitle(rfrBatchName);
+
+            ShowLitleBatchResponse(litleRfrResponse);
+        }
+
+        #endregion Batch processing
+
+        #region Transactions
 
         private static void DoAuthorization(contact contact, cardType card)
         {
@@ -72,27 +110,59 @@ namespace LittleProjectSDK_Debug
             SerializeJson(response);
         }
 
-        private static void DoAccountUpdater(contact contact, cardType card)
+        #endregion Transactions
+
+        #region Utils
+
+        private static List<contact> GetContacts()
         {
-            litleRequest litleRequestData = new litleRequest(GetSettings());
-            batchRequest batchRequestData = new batchRequest(GetSettings());
-            batchRequestData.id = "bacthId1";
+            var contacts = new List<contact>
+            {
+                new contact
+                {
+                    name = "John Smith",
+                    addressLine1 = "1 Main St.",
+                    city = "Burlington",
+                    state = "MA",
+                    zip = "01803",
+                    country = countryTypeEnum.US
+                },
+                new contact
+                {
+                    name = "John Smith",
+                    addressLine1 = "1 Main St.",
+                    city = "Burlington",
+                    state = "MA",
+                    zip = "01803",
+                    country = countryTypeEnum.US
+                }
+            };
 
-            accountUpdate accountUpdateData = new accountUpdate();
-            accountUpdateData.card = card;
-
-            batchRequestData.addAccountUpdate(accountUpdateData);
-            litleRequestData.addBatch(batchRequestData);
-
-            var batchName = litleRequestData.sendToLitle();
-            litleRequestData.blockAndWaitForResponse(batchName, estimatedResponseTime(0, 1));
-            var litleResponse = litleRequestData.receiveFromLitle(batchName);
-
-            Console.WriteLine("************************ Do Account Updater **************************");
-            SerializeJson(litleResponse);
+            return contacts;
         }
 
-        private static int estimatedResponseTime(int numAuthsAndSales, int numRest)
+        private static List<cardType> GetCreditCards()
+        {
+            var creditCards = new List<cardType>
+            {
+                new cardType
+                {
+                    type = methodOfPaymentTypeEnum.MC,
+                    number = "5194560012341234",
+                    expDate = "1250"
+                },
+                new cardType
+                {
+                    type = methodOfPaymentTypeEnum.MC,
+                    number = "5435101234510196",
+                    expDate = "0750"
+                }
+            };
+
+            return creditCards;
+        }
+
+        private static int EstimatedResponseTime(int numAuthsAndSales, int numRest)
         {
             return (int)(5 * 60 * 1000 + 2.5 * 1000 + numAuthsAndSales * (1 / 5) * 1000 + numRest * (1 / 50) * 1000) * 5;
         }
@@ -112,7 +182,8 @@ namespace LittleProjectSDK_Debug
             var settings = new Dictionary<string, string>
             {
                 { "version", "9.3" },
-                {  "printxml", "true"}
+                { "printxml", "true" },
+                { "timeout", "30" }
             };
 
             switch (settingsType)
@@ -175,10 +246,35 @@ namespace LittleProjectSDK_Debug
             //config["responseDirectory"] = Properties.Settings.Default.responseDirectory;
         }
 
+        private static void ShowLitleBatchResponse(litleResponse litleResponse)
+        {
+            Console.WriteLine("************************ litleResponse **************************");
+            litleResponse.SerializeJson();
+
+            batchResponse batchResponse = litleResponse.nextBatchResponse();
+            while (batchResponse != null)
+            {
+                Console.WriteLine("************************ batchResponse **************************");
+                batchResponse.SerializeJson();
+
+                var accountUpdateResponseData = batchResponse.nextAccountUpdateResponse();
+                while (accountUpdateResponseData != null)
+                {
+                    Console.WriteLine("************************ accountUpdateResponse **************************");
+                    accountUpdateResponseData.SerializeJson();
+                    accountUpdateResponseData = batchResponse.nextAccountUpdateResponse();
+                }
+
+                batchResponse = litleResponse.nextBatchResponse();
+            }
+        }
+
         private static void SerializeJson(this object value)
         {
             var json = JsonConvert.SerializeObject(value, Formatting.Indented);
             Console.WriteLine(json);
         }
+
+        #endregion Utils
     }
 }
